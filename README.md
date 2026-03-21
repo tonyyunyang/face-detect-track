@@ -14,6 +14,28 @@ Out of scope:
 - anonymization
 - UI
 
+## Clone
+
+Because the two vendor repos are tracked as git submodules, use a recursive clone:
+
+```bash
+git clone --recurse-submodules git@github.com-tony:tonyyunyang/face-detect-track.git
+cd face-detect-track
+```
+
+If you already cloned the root repo without submodules:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+```
+
+If you want future `git pull` and related commands to recurse into submodules automatically on your machine:
+
+```bash
+git config --global submodule.recurse true
+```
+
 ## Layout
 
 - `BoT-FaceSORT-VEED/`: third-party tracking repo, kept separate and tracked from the root repo as a git pointer
