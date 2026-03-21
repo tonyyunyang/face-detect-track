@@ -120,6 +120,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="Minimum tracked-detection confidence required when --filter-confidence is enabled.",
     )
+    parser.add_argument(
+        "--write-face-clips",
+        action="store_true",
+        help="Export cropped face video clips for every raw tracked face segment.",
+    )
+    parser.add_argument(
+        "--face-clip-padding",
+        type=float,
+        default=0.15,
+        help="Fractional padding applied to each side of the face clip crop window.",
+    )
     return parser
 
 
@@ -146,11 +157,17 @@ def main() -> None:
         min_track_median_area=args.min_track_median_area,
         filter_confidence=args.filter_confidence,
         min_confidence=args.min_confidence,
+        write_face_clips=args.write_face_clips,
+        face_clip_padding=args.face_clip_padding,
     )
 
     print(f"JSON: {result['json_path']}")
     if result["preview_path"] is not None:
         print(f"Preview: {result['preview_path']}")
+    if result["face_clips_index_path"] is not None:
+        print(f"Face clips index: {result['face_clips_index_path']}")
+    if result["face_clips_dir"] is not None:
+        print(f"Face clips dir: {result['face_clips_dir']}")
 
 
 if __name__ == "__main__":

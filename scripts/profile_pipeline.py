@@ -140,6 +140,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum tracked-detection confidence required when --filter-confidence is enabled.",
     )
     parser.add_argument(
+        "--write-face-clips",
+        action="store_true",
+        help="Export cropped face video clips for every raw tracked face segment during the full run.",
+    )
+    parser.add_argument(
+        "--face-clip-padding",
+        type=float,
+        default=0.15,
+        help="Fractional padding applied to each side of the face clip crop window.",
+    )
+    parser.add_argument(
         "--disable-shot-change",
         action="store_true",
         help="Disable shot-change-aware tracking for botfacesort.",
@@ -251,6 +262,11 @@ def print_header(
         "[profile] confidence filter: "
         f"enabled={args.filter_confidence}, "
         f"min_confidence={args.min_confidence}"
+    )
+    print(
+        "[profile] face clips: "
+        f"enabled={args.write_face_clips}, "
+        f"padding={args.face_clip_padding}"
     )
 
 
@@ -429,6 +445,10 @@ def profile_stages(
         print(
             "[profile] note: confidence-filtered preview is rendered in a second pass during the full run."
         )
+    if args.write_face_clips:
+        print(
+            "[profile] note: face clip export runs in a separate pass during the full run."
+        )
 
 
 def maybe_run_full_export(
@@ -460,6 +480,8 @@ def maybe_run_full_export(
         min_track_median_area=args.min_track_median_area,
         filter_confidence=args.filter_confidence,
         min_confidence=args.min_confidence,
+        write_face_clips=args.write_face_clips,
+        face_clip_padding=args.face_clip_padding,
         show_progress=True,
     )
     elapsed = perf_counter() - start
@@ -475,6 +497,10 @@ def maybe_run_full_export(
     print(f"[profile] json_path: {result['json_path']}")
     if result["preview_path"] is not None:
         print(f"[profile] preview_path: {result['preview_path']}")
+    if result["face_clips_index_path"] is not None:
+        print(f"[profile] face_clips_index_path: {result['face_clips_index_path']}")
+    if result["face_clips_dir"] is not None:
+        print(f"[profile] face_clips_dir: {result['face_clips_dir']}")
 
 
 def main() -> None:

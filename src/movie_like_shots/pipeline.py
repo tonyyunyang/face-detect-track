@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import string
 import sys
 from functools import lru_cache
@@ -158,6 +159,11 @@ def confidence_from_tracker_row(row: np.ndarray | list[float]) -> float:
     return round(float(row[5]), 6)
 
 
+def slugify_label(label: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+    return slug or "face"
+
+
 def draw_preview_frame(frame: np.ndarray, detections: list[dict[str, Any]]) -> np.ndarray:
     preview = frame.copy()
     for det in detections:
@@ -290,6 +296,304 @@ def apply_export_labels(
     return labeled_frames
 
 
+def build_face_clip_segment(
+    track_id: int,
+    label: str,
+    segment_index: int,
+    segment_entries: list[dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+    padding: float,
+) -> dict[str, Any]:
+    padding = max(0.0, float(padding))
+    max_bbox_width = max(
+        max(2, int(entry["bbox"][2]) - int(entry["bbox"][0])) for entry in segment_entries
+    )
+    max_bbox_height = max(
+        max(2, int(entry["bbox"][3]) - int(entry["bbox"][1])) for entry in segment_entries
+    )
+    crop_width = min(
+        frame_width,
+        max(2, int(round(max_bbox_width * (1.0 + (2.0 * padding))))),
+    )
+    crop_height = min(
+        frame_height,
+        max(2, int(round(max_bbox_height * (1.0 + (2.0 * padding))))),
+    )
+    confidences = [float(entry["confidence"]) for entry in segment_entries]
+    label_slug = slugify_label(label)
+    track_stem = f"track_{track_id:04d}_{label_slug}"
+    start_frame = int(segment_entries[0]["frame_index"])
+    end_frame = int(segment_entries[-1]["frame_index"])
+    return {
+        "track_id": track_id,
+        "label": label,
+        "label_slug": label_slug,
+        "track_stem": track_stem,
+        "segment_index": segment_index,
+        "start_frame": start_frame,
+        "end_frame": end_frame,
+        "num_frames": len(segment_entries),
+        "crop_width": crop_width,
+        "crop_height": crop_height,
+        "frame_entries": segment_entries,
+        "frame_entry_map": {
+            int(entry["frame_index"]): entry for entry in segment_entries
+        },
+        "confidence_min": round(min(confidences), 6),
+        "confidence_max": round(max(confidences), 6),
+        "confidence_mean": round(sum(confidences) / len(confidences), 6),
+    }
+
+
+def build_face_clip_segments(
+    frames: dict[str, list[dict[str, Any]]],
+    frame_width: int,
+    frame_height: int,
+    padding: float,
+) -> list[dict[str, Any]]:
+    track_entries: dict[int, dict[str, Any]] = {}
+    for frame_key, frame_entries in frames.items():
+        frame_index = int(frame_key)
+        for entry in frame_entries:
+            track_id = int(entry["id"])
+            if track_id not in track_entries:
+                track_entries[track_id] = {
+                    "label": str(entry["label"]),
+                    "entries": [],
+                }
+            track_entries[track_id]["entries"].append(
+                {
+                    "frame_index": frame_index,
+                    "bbox": list(entry["bbox"]),
+                    "center_point": list(entry["center_point"]),
+                    "confidence": float(entry["confidence"]),
+                }
+            )
+
+    segments: list[dict[str, Any]] = []
+    for track_id in sorted(track_entries.keys()):
+        label = str(track_entries[track_id]["label"])
+        detections = sorted(
+            track_entries[track_id]["entries"],
+            key=lambda entry: int(entry["frame_index"]),
+        )
+        segment_entries: list[dict[str, Any]] = []
+        segment_index = 0
+        for detection in detections:
+            if (
+                segment_entries
+                and int(detection["frame_index"])
+                != int(segment_entries[-1]["frame_index"]) + 1
+            ):
+                segments.append(
+                    build_face_clip_segment(
+                        track_id=track_id,
+                        label=label,
+                        segment_index=segment_index,
+                        segment_entries=segment_entries,
+                        frame_width=frame_width,
+                        frame_height=frame_height,
+                        padding=padding,
+                    )
+                )
+                segment_entries = []
+                segment_index += 1
+            segment_entries.append(detection)
+
+        if segment_entries:
+            segments.append(
+                build_face_clip_segment(
+                    track_id=track_id,
+                    label=label,
+                    segment_index=segment_index,
+                    segment_entries=segment_entries,
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                    padding=padding,
+                )
+            )
+
+    return segments
+
+
+def crop_bounds_from_center(
+    center_point: list[int],
+    crop_width: int,
+    crop_height: int,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int]:
+    crop_width = min(frame_width, max(2, crop_width))
+    crop_height = min(frame_height, max(2, crop_height))
+    cx, cy = int(center_point[0]), int(center_point[1])
+    max_x1 = max(frame_width - crop_width, 0)
+    max_y1 = max(frame_height - crop_height, 0)
+    x1 = max(0, min(max_x1, int(round(cx - (crop_width / 2.0)))))
+    y1 = max(0, min(max_y1, int(round(cy - (crop_height / 2.0)))))
+    x2 = x1 + crop_width
+    y2 = y1 + crop_height
+    return x1, y1, x2, y2
+
+
+def export_face_clips(
+    video_path: Path,
+    output_dir: Path,
+    fps: float,
+    width: int,
+    height: int,
+    frames: dict[str, list[dict[str, Any]]],
+    padding: float,
+    show_progress: bool,
+) -> dict[str, Any]:
+    face_clips_dir = output_dir / "face_clips"
+    face_clips_dir.mkdir(parents=True, exist_ok=True)
+    face_clips_index_path = output_dir / f"{video_path.stem}.face-clips.json"
+
+    segments = build_face_clip_segments(
+        frames=frames,
+        frame_width=width,
+        frame_height=height,
+        padding=padding,
+    )
+
+    for segment in segments:
+        track_dir = face_clips_dir / segment["track_stem"]
+        track_dir.mkdir(parents=True, exist_ok=True)
+        clip_file_name = (
+            f"{segment['track_stem']}_seg_{int(segment['segment_index']):03d}"
+            f"_frames_{int(segment['start_frame']):06d}-{int(segment['end_frame']):06d}.mp4"
+        )
+        clip_path = track_dir / clip_file_name
+        segment["clip_path"] = clip_path
+        segment["relative_clip_path"] = str(clip_path.relative_to(output_dir))
+
+    if segments:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Unable to reopen video for face clip export: {video_path}")
+
+        active_writers: dict[int, cv2.VideoWriter] = {}
+        segments_by_start: dict[int, list[dict[str, Any]]] = {}
+        segments_by_end: dict[int, list[dict[str, Any]]] = {}
+        for segment_id, segment in enumerate(segments):
+            segment["segment_id"] = segment_id
+            segments_by_start.setdefault(int(segment["start_frame"]), []).append(segment)
+            segments_by_end.setdefault(int(segment["end_frame"]), []).append(segment)
+
+        face_clip_total_frames = max(int(segment["end_frame"]) for segment in segments) + 1
+        face_clip_start_time = perf_counter()
+        last_progress_time = face_clip_start_time
+
+        try:
+            frame_index = 0
+            while frame_index < face_clip_total_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    raise RuntimeError(
+                        f"Unable to read frame {frame_index} while exporting face clips."
+                    )
+
+                for segment in segments_by_start.get(frame_index, []):
+                    writer = cv2.VideoWriter(
+                        str(segment["clip_path"]),
+                        cv2.VideoWriter_fourcc(*"mp4v"),
+                        fps if fps > 0 else 30.0,
+                        (int(segment["crop_width"]), int(segment["crop_height"])),
+                    )
+                    if not writer.isOpened():
+                        raise RuntimeError(
+                            f"Unable to open face clip writer: {segment['clip_path']}"
+                        )
+                    active_writers[int(segment["segment_id"])] = writer
+
+                for segment_id, writer in active_writers.items():
+                    segment = segments[segment_id]
+                    frame_entry = segment["frame_entry_map"].get(frame_index)
+                    if frame_entry is None:
+                        continue
+                    x1, y1, x2, y2 = crop_bounds_from_center(
+                        center_point=list(frame_entry["center_point"]),
+                        crop_width=int(segment["crop_width"]),
+                        crop_height=int(segment["crop_height"]),
+                        frame_width=width,
+                        frame_height=height,
+                    )
+                    crop = frame[y1:y2, x1:x2]
+                    writer.write(crop)
+
+                for segment in segments_by_end.get(frame_index, []):
+                    writer = active_writers.pop(int(segment["segment_id"]), None)
+                    if writer is not None:
+                        writer.release()
+
+                frame_index += 1
+                if show_progress:
+                    now = perf_counter()
+                    if (
+                        frame_index == 1
+                        or frame_index % 100 == 0
+                        or now - last_progress_time >= 10
+                    ):
+                        elapsed = now - face_clip_start_time
+                        export_fps = frame_index / elapsed if elapsed > 0 else 0.0
+                        remaining_frames = max(face_clip_total_frames - frame_index, 0)
+                        eta_seconds = (
+                            remaining_frames / export_fps if export_fps > 0 else 0.0
+                        )
+                        print(
+                            f"[movie-like-shots] face clips {frame_index}/{face_clip_total_frames} "
+                            f"({export_fps:.2f} fps, eta {eta_seconds/60:.1f} min)"
+                        )
+                        last_progress_time = now
+        finally:
+            cap.release()
+            for writer in active_writers.values():
+                writer.release()
+
+    face_clip_index = {
+        "video_metadata": {
+            "fps": round(fps, 3),
+            "width": width,
+            "height": height,
+        },
+        "export_settings": {
+            "padding": round(max(0.0, float(padding)), 3),
+        },
+        "num_clips_total": len(segments),
+        "clips": [
+            {
+                "track_id": int(segment["track_id"]),
+                "label": str(segment["label"]),
+                "segment_index": int(segment["segment_index"]),
+                "start_frame": int(segment["start_frame"]),
+                "end_frame": int(segment["end_frame"]),
+                "num_frames": int(segment["num_frames"]),
+                "clip_path": str(segment["relative_clip_path"]),
+                "crop_size": {
+                    "width": int(segment["crop_width"]),
+                    "height": int(segment["crop_height"]),
+                },
+                "confidence": {
+                    "min": float(segment["confidence_min"]),
+                    "max": float(segment["confidence_max"]),
+                    "mean": float(segment["confidence_mean"]),
+                },
+            }
+            for segment in segments
+        ],
+    }
+
+    with face_clips_index_path.open("w", encoding="utf-8") as f:
+        json.dump(face_clip_index, f, indent=2)
+
+    return {
+        "face_clips_dir": str(face_clips_dir),
+        "face_clips_index_path": str(face_clips_index_path),
+        "num_clips_total": len(segments),
+    }
+
+
 def write_filtered_preview(
     video_path: Path,
     preview_path: Path,
@@ -370,6 +674,8 @@ def run_pipeline(
     min_track_median_area: float = 2500.0,
     filter_confidence: bool = False,
     min_confidence: float = 0.5,
+    write_face_clips: bool = False,
+    face_clip_padding: float = 0.15,
     show_progress: bool = True,
 ) -> dict[str, str | None]:
     video_path = video_path.resolve()
@@ -586,6 +892,7 @@ def run_pipeline(
     export_track_ids = ordered_track_ids_for_ranges(export_track_ranges)
     export_labels = build_export_labels(export_track_ids)
     export_frames = apply_export_labels(filtered_frames, export_labels)
+    face_clip_result: dict[str, Any] | None = None
 
     if preview_path is not None and requires_filtered_preview:
         if show_progress:
@@ -614,6 +921,23 @@ def run_pipeline(
             show_progress=show_progress,
         )
 
+    if write_face_clips:
+        if show_progress:
+            print(
+                "[movie-like-shots] exporting face clips "
+                f"(padding={max(0.0, float(face_clip_padding)):.2f})"
+            )
+        face_clip_result = export_face_clips(
+            video_path=video_path,
+            output_dir=output_dir,
+            fps=fps,
+            width=width,
+            height=height,
+            frames=frames,
+            padding=face_clip_padding,
+            show_progress=show_progress,
+        )
+
     export = {
         "video_metadata": {
             "fps": round(fps, 3),
@@ -634,6 +958,13 @@ def run_pipeline(
         },
         "frames": export_frames,
     }
+    if face_clip_result is not None:
+        export["face_clips"] = {
+            "clips_dir": str(Path(face_clip_result["face_clips_dir"]).name),
+            "index_path": str(Path(face_clip_result["face_clips_index_path"]).name),
+            "num_clips_total": int(face_clip_result["num_clips_total"]),
+            "source": "raw_unfiltered_tracks",
+        }
 
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(export, f, indent=2)
@@ -641,4 +972,12 @@ def run_pipeline(
     return {
         "json_path": str(json_path),
         "preview_path": str(preview_path) if preview_path is not None else None,
+        "face_clips_dir": (
+            str(face_clip_result["face_clips_dir"]) if face_clip_result is not None else None
+        ),
+        "face_clips_index_path": (
+            str(face_clip_result["face_clips_index_path"])
+            if face_clip_result is not None
+            else None
+        ),
     }

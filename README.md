@@ -84,6 +84,16 @@ movie-like-shots kids-party-trim2-720.mp4 \
   --min-confidence 0.6
 ```
 
+If you also want cropped face video snippets for every raw tracked face segment, enable face clip export:
+
+```bash
+conda activate veed
+uv pip install -e .
+movie-like-shots kids-party-trim2-720.mp4 \
+  --write-face-clips \
+  --face-clip-padding 0.15
+```
+
 Or without installing a console script:
 
 ```bash
@@ -120,6 +130,8 @@ Confidence filtering is also off by default. When `--filter-confidence` is enabl
 
 When any export filter is enabled, preview rendering runs in a second pass after tracking so the final MP4 matches the filtered JSON exactly.
 
+Face clip export uses the raw unfiltered tracked detections, not the filtered JSON output. It writes one clip per contiguous tracked face segment and does not merge separate appearances of the same ID back together.
+
 Run the 1080p sample:
 
 ```bash
@@ -134,6 +146,8 @@ Each run writes into:
 outputs/<video-stem>/
   <video-stem>.tracks.json
   <video-stem>.preview.mp4      # only if --write-preview is used
+  <video-stem>.face-clips.json  # only if --write-face-clips is used
+  face_clips/                   # only if --write-face-clips is used
 ```
 
 The JSON includes:
@@ -149,5 +163,7 @@ Each frame entry includes:
 - `label`
 
 `confidence` is the score carried through the tracker output for that tracked detection. In the current wrapper this is detector-derived confidence attached to the active track update, not a separate long-horizon tracking-confidence metric.
+
+When face clip export is enabled, the main JSON also includes a `face_clips` summary that points to the face clip index file. Clip files are named with the track id, label, segment index, and frame range so they can be mapped back to the source video easily.
 
 Labels are generated as readable aliases like `Person A`, `Person B`, in first-appearance order for each tracked ID.
