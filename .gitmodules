@@ -1,0 +1,6 @@
+[submodule "BoT-FaceSORT-VEED"]
+	path = BoT-FaceSORT-VEED
+	url = https://github.com/tonyyunyang/BoT-FaceSORT-VEED.git
+[submodule "insightface-VEED"]
+	path = insightface-VEED
+	url = https://github.com/tonyyunyang/insightface-VEED.git
