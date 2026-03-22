@@ -5,3 +5,4 @@
 [submodule "insightface-VEED"]
 	path = insightface-VEED
 	url = https://github.com/tonyyunyang/insightface-VEED.git
+	branch = main
